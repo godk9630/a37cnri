@@ -11,10 +11,10 @@ from telegram.ext import Application, CommandHandler, CallbackContext, filters, 
 from pymongo import MongoClient
 from datetime import datetime, timedelta, timezone
 # Database Configuration
-MONGO_URI = 'mongodb+srv://Kamisama:Kamisama@kamisama.m6kon.mongodb.net'
+MONGO_URI = 'mongodb+srv://pahduhshkkop:TDS_MAN_09@cluster0.zitsd.mongodb.net'
 client = MongoClient(MONGO_URI)
-db = client['Kamisama']
-users_collection = db['RAHUL']
+db = client['MODSKING']
+users_collection = db['pahduhshkkop']
 settings_collection = db['settings0']  # A new collection to store global settings
 redeem_codes_collection = db['redeem_codes0']
 
