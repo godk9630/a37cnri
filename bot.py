@@ -2,16 +2,19 @@ import logging
 import os
 import threading
 from flask import Flask
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand, BotCommandScopeChat
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
     CallbackQueryHandler, ContextTypes, filters
 )
 
 # ─── CONFIG ───────────────────────────────────────────────
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "7458894503:AAHwCdLgWV3NlNB1OuCnMzxq3fdiT0ZzxMs")
-ADMIN_ID   = int(os.environ.get("ADMIN_ID", "2077682354"))
-PORT       = int(os.environ.get("PORT", 8080))
+BOT_TOKEN = os.environ.get("BOT_TOKEN")   # Set in Render environment variables
+ADMIN_ID  = int(os.environ.get("ADMIN_ID", "2077682354"))
+PORT      = int(os.environ.get("PORT", 8080))
+
+if not BOT_TOKEN:
+    raise ValueError("BOT_TOKEN environment variable is not set!")
 # ──────────────────────────────────────────────────────────
 
 logging.basicConfig(
@@ -25,7 +28,7 @@ flask_app = Flask(__name__)
 
 @flask_app.route("/")
 def home():
-    return "MODSKING Contact Bot is running ✅", 200
+    return "MODKING Contact Bot is running ✅", 200
 
 @flask_app.route("/health")
 def health():
@@ -65,6 +68,29 @@ def admin_keyboard():
             InlineKeyboardButton("❓ Help",          callback_data="cmd_help"),
         ],
     ])
+
+# ── Set bot commands in Telegram menu ────────────────────
+async def post_init(app: Application):
+    # Commands visible to all users
+    user_commands = [
+        BotCommand("start", "Start the bot"),
+    ]
+
+    # Commands visible only to admin
+    admin_commands = [
+        BotCommand("start", "Start the bot"),
+        BotCommand("panel", "Open admin panel"),
+    ]
+
+    # Set default commands for everyone
+    await app.bot.set_my_commands(user_commands)
+
+    # Set extra commands only for admin chat
+    await app.bot.set_my_commands(
+        admin_commands,
+        scope=BotCommandScopeChat(chat_id=ADMIN_ID)
+    )
+    logger.info("Bot commands set successfully.")
 
 # ── /start ────────────────────────────────────────────────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -296,15 +322,20 @@ def main():
     flask_thread.start()
     logger.info(f"Flask server started on port {PORT}")
 
-    # Build and run the bot
-    app = Application.builder().token(BOT_TOKEN).build()
+    # Build bot with post_init to set commands on startup
+    app = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .post_init(post_init)
+        .build()
+    )
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("panel", panel))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_user_message))
 
-    logger.info("MODSKING Contact Bot is polling...")
+    logger.info("MODKING Contact Bot is polling...")
     app.run_polling(
         allowed_updates=Update.ALL_TYPES,
         drop_pending_updates=True
