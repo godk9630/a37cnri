@@ -1,5 +1,6 @@
 import logging
 import os
+import asyncio
 import threading
 from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand, BotCommandScopeChat
@@ -9,7 +10,7 @@ from telegram.ext import (
 )
 
 # ─── CONFIG ───────────────────────────────────────────────
-BOT_TOKEN = os.environ.get("BOT_TOKEN")   # Set in Render environment variables
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
 ADMIN_ID  = int(os.environ.get("ADMIN_ID", "2077682354"))
 PORT      = int(os.environ.get("PORT", 8080))
 
@@ -23,12 +24,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ── Flask keep-alive (Render needs an HTTP port) ──────────
+# ── Flask keep-alive ──────────────────────────────────────
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
 def home():
-    return "MODKING Contact Bot is running ✅", 200
+    return "Admin Bot is running ✅", 200
 
 @flask_app.route("/health")
 def health():
@@ -39,7 +40,7 @@ def run_flask():
 
 # ── Shared state ──────────────────────────────────────────
 state = {
-    "users":          {},     # {uid: {name, username, banned}}
+    "users":          {},
     "notify":         True,
     "broadcast_mode": False,
     "ban_mode":       False,
@@ -69,23 +70,16 @@ def admin_keyboard():
         ],
     ])
 
-# ── Set bot commands in Telegram menu ────────────────────
+# ── Set bot commands on startup ───────────────────────────
 async def post_init(app: Application):
-    # Commands visible to all users
     user_commands = [
         BotCommand("start", "Start the bot"),
     ]
-
-    # Commands visible only to admin
     admin_commands = [
         BotCommand("start", "Start the bot"),
         BotCommand("panel", "Open admin panel"),
     ]
-
-    # Set default commands for everyone
     await app.bot.set_my_commands(user_commands)
-
-    # Set extra commands only for admin chat
     await app.bot.set_my_commands(
         admin_commands,
         scope=BotCommandScopeChat(chat_id=ADMIN_ID)
@@ -97,13 +91,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     uid  = user.id
 
-    if uid != ADMIN_ID:
-        if uid not in state["users"]:
-            state["users"][uid] = {
-                "name":     user.full_name,
-                "username": user.username or "N/A",
-                "banned":   False,
-            }
+    if uid != ADMIN_ID and uid not in state["users"]:
+        state["users"][uid] = {
+            "name":     user.full_name,
+            "username": user.username or "N/A",
+            "banned":   False,
+        }
 
     if is_admin(uid):
         await update.message.reply_text(
@@ -136,7 +129,6 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         await handle_admin_text(update, context)
         return
 
-    # Register new user
     if uid not in state["users"]:
         state["users"][uid] = {
             "name":     user.full_name,
@@ -231,7 +223,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("⛔ Admin only!", show_alert=True)
         return
 
-    # Reset all modes first
     state["broadcast_mode"] = False
     state["ban_mode"]        = False
     state["unban_mode"]      = False
@@ -316,13 +307,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 # ── Main ──────────────────────────────────────────────────
-def main():
-    # Start Flask in background thread (keeps Render happy)
-    flask_thread = threading.Thread(target=run_flask, daemon=True)
-    flask_thread.start()
-    logger.info(f"Flask server started on port {PORT}")
-
-    # Build bot with post_init to set commands on startup
+async def run_bot():
     app = (
         Application.builder()
         .token(BOT_TOKEN)
@@ -335,11 +320,26 @@ def main():
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_user_message))
 
-    logger.info("MODKING Contact Bot is polling...")
-    app.run_polling(
+    logger.info("Admin Bot is starting...")
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling(
         allowed_updates=Update.ALL_TYPES,
         drop_pending_updates=True
     )
+    logger.info("Admin Bot is polling...")
+
+    # Keep running forever
+    await asyncio.Event().wait()
+
+def main():
+    # Start Flask in background thread
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+    logger.info(f"Flask server started on port {PORT}")
+
+    # Run bot with asyncio directly (avoids PTB internal loop conflicts)
+    asyncio.run(run_bot())
 
 if __name__ == "__main__":
     main()
