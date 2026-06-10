@@ -1,77 +1,83 @@
 import logging
 import os
+import threading
+from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
     CallbackQueryHandler, ContextTypes, filters
 )
-from flask import Flask
-import threading
 
 # ─── CONFIG ───────────────────────────────────────────────
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "7458894503:AAHwCdLgWV3NlNB1OuCnMzxq3fdiT0ZzxMs")
-ADMIN_ID   = int(os.environ.get("ADMIN_ID", "2077682354"))  # e.g. 123456789
+ADMIN_ID   = int(os.environ.get("ADMIN_ID", "2077682354"))
 PORT       = int(os.environ.get("PORT", 8080))
 # ──────────────────────────────────────────────────────────
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO
+)
 logger = logging.getLogger(__name__)
 
-# ── Flask keep-alive (required by Render) ─────────────────
+# ── Flask keep-alive (Render needs an HTTP port) ──────────
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
 def home():
-    return "MODKING Contact Bot is running ✅"
+    return "MODSKING Contact Bot is running ✅", 200
+
+@flask_app.route("/health")
+def health():
+    return "OK", 200
 
 def run_flask():
-    flask_app.run(host="0.0.0.0", port=PORT)
+    flask_app.run(host="0.0.0.0", port=PORT, use_reloader=False, debug=False)
+
+# ── Shared state ──────────────────────────────────────────
+state = {
+    "users":          {},     # {uid: {name, username, banned}}
+    "notify":         True,
+    "broadcast_mode": False,
+    "ban_mode":       False,
+    "unban_mode":     False,
+}
 
 # ── Helpers ───────────────────────────────────────────────
-def is_admin(user_id: int) -> bool:
-    return user_id == ADMIN_ID
+def is_admin(uid: int) -> bool:
+    return uid == ADMIN_ID
 
 def admin_keyboard():
-    keyboard = [
+    return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("📋 All Users",      callback_data="cmd_users"),
-            InlineKeyboardButton("📢 Broadcast",      callback_data="cmd_broadcast"),
+            InlineKeyboardButton("📋 All Users",     callback_data="cmd_users"),
+            InlineKeyboardButton("📢 Broadcast",     callback_data="cmd_broadcast"),
         ],
         [
-            InlineKeyboardButton("🚫 Ban User",       callback_data="cmd_ban"),
-            InlineKeyboardButton("✅ Unban User",     callback_data="cmd_unban"),
+            InlineKeyboardButton("🚫 Ban User",      callback_data="cmd_ban"),
+            InlineKeyboardButton("✅ Unban User",    callback_data="cmd_unban"),
         ],
         [
-            InlineKeyboardButton("📊 Bot Stats",      callback_data="cmd_stats"),
-            InlineKeyboardButton("🔔 Toggle Notify",  callback_data="cmd_toggle_notify"),
+            InlineKeyboardButton("📊 Bot Stats",     callback_data="cmd_stats"),
+            InlineKeyboardButton("🔔 Toggle Notify", callback_data="cmd_toggle_notify"),
         ],
         [
-            InlineKeyboardButton("❓ Help",           callback_data="cmd_help"),
+            InlineKeyboardButton("❓ Help",          callback_data="cmd_help"),
         ],
-    ]
-    return InlineKeyboardMarkup(keyboard)
-
-# Shared state
-state = {
-    "users": {},        # {user_id: {"name": ..., "username": ..., "banned": False}}
-    "notify": True,     # forward user msgs to admin?
-    "broadcast_mode": False,
-    "ban_mode": False,
-    "unban_mode": False,
-}
+    ])
 
 # ── /start ────────────────────────────────────────────────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     uid  = user.id
 
-    # Register user
     if uid != ADMIN_ID:
-        state["users"][uid] = {
-            "name":     user.full_name,
-            "username": user.username or "N/A",
-            "banned":   state["users"].get(uid, {}).get("banned", False),
-        }
+        if uid not in state["users"]:
+            state["users"][uid] = {
+                "name":     user.full_name,
+                "username": user.username or "N/A",
+                "banned":   False,
+            }
 
     if is_admin(uid):
         await update.message.reply_text(
@@ -81,31 +87,30 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     else:
         await update.message.reply_text(
-            f"👋 Hello *{user.first_name}*!\n\n"
-            "Send me any message and the admin will receive it.",
+            f"👋 Hello *{user.first_name}*!\n\nSend me any message and the admin will receive it.",
             parse_mode="Markdown"
         )
 
-# ── /panel (admin shortcut) ───────────────────────────────
+# ── /panel ────────────────────────────────────────────────
 async def panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
     await update.message.reply_text(
-        "🛠 *Admin Panel*", parse_mode="Markdown",
+        "🛠 *Admin Panel*",
+        parse_mode="Markdown",
         reply_markup=admin_keyboard()
     )
 
-# ── Handle user messages → forward to admin ───────────────
+# ── User message handler ──────────────────────────────────
 async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     uid  = user.id
 
     if is_admin(uid):
-        # Admin typed something outside button flow
         await handle_admin_text(update, context)
         return
 
-    # Register if new
+    # Register new user
     if uid not in state["users"]:
         state["users"][uid] = {
             "name":     user.full_name,
@@ -121,13 +126,12 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("✅ Message noted! Admin will reply soon.")
         return
 
-    # Forward to admin
     header = (
         f"📩 *New Message*\n"
         f"👤 Name: {user.full_name}\n"
         f"🔖 Username: @{user.username or 'N/A'}\n"
         f"🆔 ID: `{uid}`\n"
-        f"─────────────────\n"
+        f"─────────────────"
     )
     reply_kb = InlineKeyboardMarkup([[
         InlineKeyboardButton(f"↩️ Reply to {user.first_name}", callback_data=f"reply_{uid}")
@@ -140,45 +144,45 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     except Exception as e:
         logger.error(f"Forward error: {e}")
 
-# ── Admin text handler (for broadcast / ban / reply) ──────
+# ── Admin text handler ────────────────────────────────────
 async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
+    text = update.message.text or ""
 
-    if state.get("broadcast_mode"):
+    if state["broadcast_mode"]:
         state["broadcast_mode"] = False
         count = 0
-        for uid, info in state["users"].items():
+        for u_id, info in state["users"].items():
             if not info["banned"]:
                 try:
-                    await context.bot.send_message(uid, f"📢 *Broadcast:*\n\n{text}", parse_mode="Markdown")
+                    await context.bot.send_message(u_id, f"📢 *Broadcast:*\n\n{text}", parse_mode="Markdown")
                     count += 1
-                except:
+                except Exception:
                     pass
         await update.message.reply_text(f"📢 Broadcast sent to {count} users.", reply_markup=admin_keyboard())
 
-    elif state.get("ban_mode"):
+    elif state["ban_mode"]:
         state["ban_mode"] = False
         try:
-            uid = int(text.strip())
-            if uid in state["users"]:
-                state["users"][uid]["banned"] = True
-                await update.message.reply_text(f"🚫 User `{uid}` has been banned.", parse_mode="Markdown", reply_markup=admin_keyboard())
+            target = int(text.strip())
+            if target in state["users"]:
+                state["users"][target]["banned"] = True
+                await update.message.reply_text(f"🚫 User `{target}` banned.", parse_mode="Markdown", reply_markup=admin_keyboard())
             else:
                 await update.message.reply_text("❌ User ID not found.", reply_markup=admin_keyboard())
         except ValueError:
-            await update.message.reply_text("❌ Invalid ID. Send a number.", reply_markup=admin_keyboard())
+            await update.message.reply_text("❌ Send a valid numeric ID.", reply_markup=admin_keyboard())
 
-    elif state.get("unban_mode"):
+    elif state["unban_mode"]:
         state["unban_mode"] = False
         try:
-            uid = int(text.strip())
-            if uid in state["users"]:
-                state["users"][uid]["banned"] = False
-                await update.message.reply_text(f"✅ User `{uid}` has been unbanned.", parse_mode="Markdown", reply_markup=admin_keyboard())
+            target = int(text.strip())
+            if target in state["users"]:
+                state["users"][target]["banned"] = False
+                await update.message.reply_text(f"✅ User `{target}` unbanned.", parse_mode="Markdown", reply_markup=admin_keyboard())
             else:
                 await update.message.reply_text("❌ User ID not found.", reply_markup=admin_keyboard())
         except ValueError:
-            await update.message.reply_text("❌ Invalid ID. Send a number.", reply_markup=admin_keyboard())
+            await update.message.reply_text("❌ Send a valid numeric ID.", reply_markup=admin_keyboard())
 
     elif context.user_data.get("reply_to"):
         target_uid = context.user_data.pop("reply_to")
@@ -186,20 +190,25 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(target_uid, f"📬 *Admin Reply:*\n\n{text}", parse_mode="Markdown")
             await update.message.reply_text("✅ Reply sent!", reply_markup=admin_keyboard())
         except Exception as e:
-            await update.message.reply_text(f"❌ Failed: {e}", reply_markup=admin_keyboard())
+            await update.message.reply_text(f"❌ Failed to send: {e}", reply_markup=admin_keyboard())
     else:
         await update.message.reply_text("Use the panel buttons 👇", reply_markup=admin_keyboard())
 
-# ── Button callbacks ───────────────────────────────────────
+# ── Button callbacks ──────────────────────────────────────
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    data  = query.data
-    uid   = query.from_user.id
+    data = query.data
+    uid  = query.from_user.id
 
     if not is_admin(uid):
         await query.answer("⛔ Admin only!", show_alert=True)
         return
+
+    # Reset all modes first
+    state["broadcast_mode"] = False
+    state["ban_mode"]        = False
+    state["unban_mode"]      = False
 
     if data == "cmd_users":
         if not state["users"]:
@@ -214,72 +223,80 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data == "cmd_broadcast":
         state["broadcast_mode"] = True
-        state["ban_mode"]       = False
-        state["unban_mode"]     = False
-        await query.edit_message_text("📢 *Broadcast Mode*\n\nSend the message to broadcast to all users:", parse_mode="Markdown")
+        await query.edit_message_text(
+            "📢 *Broadcast Mode*\n\nType the message to send to all users:",
+            parse_mode="Markdown"
+        )
 
     elif data == "cmd_ban":
-        state["ban_mode"]       = True
-        state["broadcast_mode"] = False
-        state["unban_mode"]     = False
-        await query.edit_message_text("🚫 *Ban User*\n\nSend the user's Telegram ID:", parse_mode="Markdown")
+        state["ban_mode"] = True
+        await query.edit_message_text(
+            "🚫 *Ban User*\n\nSend the user's Telegram ID:",
+            parse_mode="Markdown"
+        )
 
     elif data == "cmd_unban":
-        state["unban_mode"]     = True
-        state["broadcast_mode"] = False
-        state["ban_mode"]       = False
-        await query.edit_message_text("✅ *Unban User*\n\nSend the user's Telegram ID:", parse_mode="Markdown")
+        state["unban_mode"] = True
+        await query.edit_message_text(
+            "✅ *Unban User*\n\nSend the user's Telegram ID:",
+            parse_mode="Markdown"
+        )
 
     elif data == "cmd_stats":
         total  = len(state["users"])
         banned = sum(1 for u in state["users"].values() if u["banned"])
         active = total - banned
         notify = "🟢 ON" if state["notify"] else "🔴 OFF"
-        msg = (
+        await query.edit_message_text(
             f"📊 *Bot Statistics*\n\n"
             f"👥 Total Users : {total}\n"
             f"✅ Active      : {active}\n"
             f"🚫 Banned      : {banned}\n"
-            f"🔔 Notify      : {notify}"
+            f"🔔 Notify      : {notify}",
+            parse_mode="Markdown",
+            reply_markup=admin_keyboard()
         )
-        await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=admin_keyboard())
 
     elif data == "cmd_toggle_notify":
         state["notify"] = not state["notify"]
         status = "🟢 ON" if state["notify"] else "🔴 OFF"
         await query.edit_message_text(
             f"🔔 Notifications are now *{status}*",
-            parse_mode="Markdown", reply_markup=admin_keyboard()
+            parse_mode="Markdown",
+            reply_markup=admin_keyboard()
         )
 
     elif data == "cmd_help":
-        help_text = (
+        await query.edit_message_text(
             "❓ *Admin Commands Help*\n\n"
             "📋 *All Users* — List all registered users\n"
-            "📢 *Broadcast* — Send a message to all users\n"
-            "🚫 *Ban User* — Ban a user by ID\n"
-            "✅ *Unban User* — Unban a user by ID\n"
+            "📢 *Broadcast* — Send message to all users\n"
+            "🚫 *Ban User* — Ban a user by Telegram ID\n"
+            "✅ *Unban User* — Unban a user by Telegram ID\n"
             "📊 *Bot Stats* — View bot statistics\n"
             "🔔 *Toggle Notify* — Turn message forwarding on/off\n\n"
-            "💡 Users can message the bot and you'll receive it here with a Reply button."
+            "💡 When a user messages the bot, you receive it with a Reply button.",
+            parse_mode="Markdown",
+            reply_markup=admin_keyboard()
         )
-        await query.edit_message_text(help_text, parse_mode="Markdown", reply_markup=admin_keyboard())
 
     elif data.startswith("reply_"):
         target_uid = int(data.split("_")[1])
         context.user_data["reply_to"] = target_uid
         name = state["users"].get(target_uid, {}).get("name", str(target_uid))
         await query.edit_message_text(
-            f"↩️ *Reply to {name}*\n\nType your reply message:",
+            f"↩️ *Replying to {name}*\n\nType your reply message now:",
             parse_mode="Markdown"
         )
 
 # ── Main ──────────────────────────────────────────────────
 def main():
-    # Start Flask in background thread
-    t = threading.Thread(target=run_flask, daemon=True)
-    t.start()
+    # Start Flask in background thread (keeps Render happy)
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+    logger.info(f"Flask server started on port {PORT}")
 
+    # Build and run the bot
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
@@ -287,8 +304,11 @@ def main():
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_user_message))
 
-    logger.info("MODKING Contact Bot started...")
-    app.run_polling(drop_pending_updates=True)
+    logger.info("MODSKING Contact Bot is polling...")
+    app.run_polling(
+        allowed_updates=Update.ALL_TYPES,
+        drop_pending_updates=True
+    )
 
 if __name__ == "__main__":
     main()
